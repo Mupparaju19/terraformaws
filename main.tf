@@ -1,25 +1,52 @@
 provider "aws" {
-  region = "us-west-2"  # Change this to your preferred AWS region
+  region = "us-west-2"
 }
 
-resource "aws_instance" "example" {
-  ami           = "ami-00c257e12d6828491"  # Replace with the AMI ID you want to use (Check AWS Console)
-  instance_type = "t2.micro"  # You can change this to any other instance type as needed (e.g., t2.small, t3.medium, etc.)
+variable "vpc_id" {
+  default = "vpc-08f03d3aaae22a835"  # Replace with your VPC ID
+}
 
-  key_name = "annis"  # Replace with your EC2 key pair name for SSH access
+# Create a Security Group for the EC2 instance in the correct VPC
+resource "aws_security_group" "ec2_sg" {
+  name        = "ec2-security-group"
+  description = "Allow SSH and HTTP inbound traffic"
+  vpc_id      = var.vpc_id
 
-  tags = {
-    Name = "MyAWSInstance"  # You can change the Name tag to whatever you prefer
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # Optional: Configure security groups to allow SSH access (Port 22)
-  security_groups = ["default"]
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
-  # Optional: Set up a specific subnet (if you have VPC setup with subnets)
-  subnet_id = "subnet-0860dff92ea555839"  # Replace with your subnet ID
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
 
-  # Optional: If you need to attach a public IP to your instance
+# Create the EC2 instance
+resource "aws_instance" "example" {
+  ami           = "ami-00c257e12d6828491"  # Replace with the AMI ID you want to use (Check AWS Console)
+  instance_type = "t2.micro"
+  key_name      = "annis"
+
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+  subnet_id              = "subnet-0860dff92ea555839"  # Replace with your subnet ID
   associate_public_ip_address = true
+
+  tags = {
+    Name = "MyAWSInstance"
+  }
 }
 
 output "instance_id" {
@@ -29,9 +56,10 @@ output "instance_id" {
 output "public_ip" {
   value = aws_instance.example.public_ip
 }
+
 # Create the S3 Bucket
 resource "aws_s3_bucket" "static_website" {
-  bucket = "my-static-website-bucket"  # Replace with your desired bucket name
+  bucket = "my-static-website-bucket-unique12345"  # Replace with a unique bucket name
 
   tags = {
     Name        = "MyStaticWebsiteBucket"
@@ -39,10 +67,17 @@ resource "aws_s3_bucket" "static_website" {
   }
 }
 
+# Disable Block Public Access for the S3 Bucket
+resource "aws_s3_bucket_public_access_block" "static_website_block" {
+  bucket = aws_s3_bucket.static_website.bucket
+
+  block_public_acls   = false
+  block_public_policy = false
+}
+
 # Configure the S3 Bucket for Website Hosting
 resource "aws_s3_bucket_website_configuration" "website" {
   bucket = aws_s3_bucket.static_website.bucket
-
   index_document {
     suffix = "index.html"
   }
@@ -52,15 +87,12 @@ resource "aws_s3_bucket_website_configuration" "website" {
   }
 }
 
-# Download the HTML files from GitHub and upload them to S3
+# Use AWS CLI to Upload Files to S3 from GitHub (fix for wget issue)
 resource "null_resource" "download_github_files" {
   provisioner "local-exec" {
     command = <<EOT
-      # Download files from GitHub repository
-      wget https://raw.githubusercontent.com/Mupparaju19/terraformaws/main/index.html -O index.html
-      wget https://raw.githubusercontent.com/Mupparaju19/terraformaws/main/error.html -O error.html
-
-      # Upload to S3
+      curl -o index.html https://raw.githubusercontent.com/Mupparaju19/websiteaws/main/index.html
+      curl -o error.html https://raw.githubusercontent.com/Mupparaju19/websiteaws/main/error.html
       aws s3 cp index.html s3://${aws_s3_bucket.static_website.bucket}/index.html
       aws s3 cp error.html s3://${aws_s3_bucket.static_website.bucket}/error.html
     EOT
@@ -68,7 +100,8 @@ resource "null_resource" "download_github_files" {
 
   depends_on = [aws_s3_bucket.static_website]
 }
-# Create the IAM Policy that allows EC2 to access the S3 bucket
+
+# Create the IAM Policy that allows EC2 to access S3 bucket
 resource "aws_iam_policy" "ec2_s3_access" {
   name        = "EC2S3AccessPolicy"
   description = "Policy that allows EC2 instances to access S3 bucket"
@@ -78,7 +111,7 @@ resource "aws_iam_policy" "ec2_s3_access" {
       {
         Effect   = "Allow"
         Action   = "s3:GetObject"
-        Resource = "arn:aws:s3:::my-static-website-bucket/*"
+        Resource = "${aws_s3_bucket.static_website.arn}/*"
       }
     ]
   })
@@ -106,3 +139,22 @@ resource "aws_iam_role_policy_attachment" "ec2_role_policy_attachment" {
   role       = aws_iam_role.ec2_role.name
   policy_arn = aws_iam_policy.ec2_s3_access.arn
 }
+
+# Create the S3 Bucket Policy to allow public access to the objects
+resource "aws_s3_bucket_policy" "static_website_policy" {
+  bucket = aws_s3_bucket.static_website.bucket  # Referencing the S3 bucket created
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Sid       = "PublicReadGetObject"
+        Effect    = "Allow"
+        Principal = "*"
+        Action    = "s3:GetObject"
+        Resource  = "arn:aws:s3:::${aws_s3_bucket.static_website.bucket}/*"  # Dynamically use the bucket name
+      }
+    ]
+  })
+}
+
